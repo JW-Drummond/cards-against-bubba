@@ -1,116 +1,135 @@
-# card_repository.py
+# src/cards_engine/card_repository.py
 
-import os
 import json
-from glob import glob
-from typing import List, Optional, Dict
-from collections import defaultdict
 from pathlib import Path
-
+from typing import Dict, List, Optional
 import zstandard as zstd
-
 from .card import Card
+from .data_fetcher import ensure_data
+
+# Sentinel used when no region filtering is needed.
+_ALL_REGIONS_TRUE: Dict[str, bool] = {"us": True, "uk": True, "ca": True, "au": True, "intl": True}
+
 
 class CardRepository:
-    def __init__(self, path_pattern: Optional[str] = None):
-        self._path_pattern = path_pattern or self._default_path_pattern()
-        self._cards: List[Card] = self._load_all(self._path_pattern)
+    """
+    Loads cards from a cah-all-full.json (or .json.zst) file.
 
-    def _default_path_pattern(self) -> str:
-        here = os.path.dirname(__file__)
-        project_root = os.path.abspath(os.path.join(here, "..", ".."))
-        data_dir = os.path.join(project_root, "data")
-        # include both .json and .json.zst
-        return os.path.join(data_dir, "*.json*")
+    On first instantiation the file is downloaded automatically if it does
+    not already exist (see data_fetcher.ensure_data).  Pass an explicit
+    *path* to skip auto-download and load from that file instead.
 
-    def _load_all(self, path_pattern: str) -> List[Card]:
-        cards: List[Card] = []
-        files = sorted(glob(path_pattern))
-        print(f"[CardRepo] Found {len(files)} data files matching {path_pattern}:")
-        for fn in files:
-            basename = os.path.basename(fn)
-            # derive expansion name
-            if basename.endswith('.json.zst'):
-                expansion = basename[:-len('.json.zst')]
-                print(f"  → Detected compressed file: {fn!r}")
-            else:
-                expansion = os.path.splitext(basename)[0]
-                print(f"  → Detected uncompressed file: {fn!r}")
-            expansion = expansion.removesuffix("_pack")
+    Expected top-level format:
+        [
+          {
+            "name": "CAH Base Set",
+            "official": true,
+            "white": [{"text": "...", "pack": 0}, ...],
+            "black": [{"text": "...", "pick": 1, "pack": 0}, ...]
+          },
+          ...
+        ]
 
-            print(f"  → Loading file: {fn!r} as expansion '{expansion}'")
+    Because the source file has no region data, every card is tagged with
+    all regions set to True.  The filter() method still accepts a regions
+    argument for API compatibility, but all cards pass any region filter.
+    """
 
-            raw_cards = self._load_file(fn)
-            print(f"     contains {len(raw_cards)} raw cards")
-
-            for raw in raw_cards:
-                cards.append(Card(
-                    text      = raw["text"],
-                    card_type = raw["type"],
-                    pick      = raw.get("pick", 1),
-                    regions   = raw["regions"],
-                    expansion = expansion
-                ))
-        print(f"[CardRepo] Total cards loaded: {len(cards)}\n")
-        return cards
-
-    def _load_file(self, fn: str) -> List[Dict]:
-        if fn.lower().endswith('.json.zst'):
-            data = Path(fn).read_bytes()
-            dctx = zstd.ZstdDecompressor()
-            txt = dctx.decompress(data).decode('utf-8')
-            return json.loads(txt)
+    def __init__(self, path: Optional[str] = None) -> None:
+        if path:
+            self._path = path
         else:
-            with open(fn, encoding='utf-8') as f:
-                return json.load(f)
+            # Auto-download if needed, then resolve the path.
+            self._path = str(ensure_data())
+        self._cards: List[Card] = self._load(self._path)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def load(self) -> List[Card]:
         return list(self._cards)
 
     def filter(
         self,
-        card_type:  Optional[str]          = None,
-        regions:    Optional[Dict[str,bool]] = None,
-        expansions: Optional[List[str]]     = None
+        card_type:  Optional[str]            = None,
+        regions:    Optional[Dict[str, bool]] = None,
+        expansions: Optional[List[str]]       = None,
     ) -> List[Card]:
         cards = self._cards
         if card_type:
             cards = [c for c in cards if c.card_type == card_type]
         if regions:
+            # All cards have every region True, so any non-empty region dict
+            # matches everything.  We keep the check for forward-compatibility.
             cards = [
                 c for c in cards
-                if any(regions.get(r, False) and c.regions.get(r, False)
-                       for r in regions)
+                if any(regions.get(r, False) and c.regions.get(r, False) for r in regions)
             ]
         if expansions:
-            cards = [c for c in cards if c.expansion in expansions]
-        return cards.copy()
-
-    def print_stats(self) -> None:
-        per_file = defaultdict(int)
-        region_totals = defaultdict(int)
-        for c in self._cards:
-            per_file[c.expansion] += 1
-            for region, allowed in c.regions.items():
-                if allowed:
-                    region_totals[region] += 1
-
-        for exp, cnt in per_file.items():
-            print(f"Loaded {cnt} cards from expansion '{exp}'")
-        print("\nTotals by region:")
-        for region, cnt in region_totals.items():
-            print(f"  {region}: {cnt}")
-        print(f"\nGrand total: {len(self._cards)} cards\n")
-
-    def reload(self, path_pattern: Optional[str] = None) -> None:
-        if path_pattern:
-            self._path_pattern = path_pattern
-        self._cards = self._load_all(self._path_pattern)
+            exp_set = set(expansions)
+            cards = [c for c in cards if c.expansion in exp_set]
+        return list(cards)
 
     def available_expansions(self) -> List[str]:
-        return sorted({c.expansion for c in self._cards})
+        seen: Dict[str, None] = {}
+        for c in self._cards:
+            seen[c.expansion] = None
+        return list(seen)
 
     def available_regions(self) -> List[str]:
-        if not self._cards:
-            return []
-        return list(self._cards[0].regions.keys())
+        return list(_ALL_REGIONS_TRUE.keys())
+
+    def reload(self, path: Optional[str] = None, force_download: bool = False) -> None:
+        if path:
+            self._path = path
+        elif force_download:
+            self._path = str(ensure_data(force=True))
+        self._cards = self._load(self._path)
+
+    def print_stats(self) -> None:
+        from collections import Counter
+        counts = Counter(c.expansion for c in self._cards)
+        for exp, n in counts.items():
+            print(f"  {exp}: {n} cards")
+        print(f"\nGrand total: {len(self._cards)} cards")
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_bytes(path: str) -> bytes:
+        raw = Path(path).read_bytes()
+        if path.lower().endswith(".zst"):
+            raw = zstd.ZstdDecompressor().decompress(raw)
+        return raw
+
+    def _load(self, path: str) -> List[Card]:
+        print(f"[CardRepository] Loading from {path!r}")
+        packs: List[Dict] = json.loads(self._read_bytes(path).decode("utf-8"))
+
+        cards: List[Card] = []
+        for pack in packs:
+            name = pack.get("name", "Unknown Pack")
+
+            for raw in pack.get("white", []):
+                cards.append(Card(
+                    text      = raw["text"],
+                    card_type = "response",
+                    pick      = 1,
+                    regions   = _ALL_REGIONS_TRUE,
+                    expansion = name,
+                ))
+
+            for raw in pack.get("black", []):
+                cards.append(Card(
+                    text      = raw["text"],
+                    card_type = "prompt",
+                    pick      = raw.get("pick", 1),
+                    regions   = _ALL_REGIONS_TRUE,
+                    expansion = name,
+                ))
+
+        print(f"[CardRepository] Loaded {len(cards)} cards from {len(packs)} packs.")
+        return cards

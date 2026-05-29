@@ -1,5 +1,7 @@
-discord.py==2.5.2
-pyspellchecker==0.8.3
-pytest==8.4.0
-python_Levenshtein==0.27.1
-zstandard==0.23.0
+py-cord
+pyspellchecker
+pytest
+python_Levenshtein
+zstandard
+pyperclip
+python-dotenv
