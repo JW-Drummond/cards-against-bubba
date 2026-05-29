@@ -8,8 +8,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     user_id = bot.user.id if bot.user else "Unknown"
     print(f"Bot is ready. User ID: {user_id}")
-    for guild in bot.guilds:
-        print(f"{guild.name} — {guild.id} — owner: {guild.owner}")
 
 if __name__ == "__main__":
     for cog in ["discord_bot.cogs.game_cog"]:
